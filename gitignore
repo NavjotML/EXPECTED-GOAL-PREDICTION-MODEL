@@ -1,0 +1,42 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# VS Code
+.vscode/
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Build files
+build/
+dist/
+*.egg-info/
+
+# Model artifacts (large generated files)
+models/*.json
+models/*.pkl
+models/*.joblib
+models/*.bin
+
+# Generated plots/reports
+models/*.png
+
+# Data files (if large/private)
+data/*.csv

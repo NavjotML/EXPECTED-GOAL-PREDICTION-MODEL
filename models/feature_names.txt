@@ -1,0 +1,10 @@
+distance
+angle
+is_header
+is_volley
+is_big_chance
+is_free_kick
+defenders_in_cone
+gk_set
+centrality
+dist_angle

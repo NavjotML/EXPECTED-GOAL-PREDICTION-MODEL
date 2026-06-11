@@ -1,0 +1,52 @@
+{
+  "features": [
+    "distance",
+    "angle",
+    "is_header",
+    "is_volley",
+    "is_big_chance",
+    "is_free_kick",
+    "defenders_in_cone",
+    "gk_set",
+    "centrality",
+    "dist_angle"
+  ],
+  "cv_results": {
+    "auc_mean": 0.763,
+    "auc_std": 0.0164,
+    "logloss_mean": 0.3202,
+    "brier_mean": 0.0939
+  },
+  "train_metrics": {
+    "auc_roc": 0.8596,
+    "log_loss": 0.2839,
+    "brier": 0.0822,
+    "accuracy": 0.8958
+  },
+  "shap_importance": {
+    "angle": 0.6448,
+    "distance": 0.3774,
+    "defenders_in_cone": 0.3451,
+    "is_header": 0.2652,
+    "dist_angle": 0.1713,
+    "centrality": 0.1409,
+    "is_volley": 0.1393,
+    "is_free_kick": 0.051,
+    "is_big_chance": 0.0022,
+    "gk_set": 0.0
+  },
+  "model_params": {
+    "n_estimators": 600,
+    "max_depth": 4,
+    "learning_rate": 0.05,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 10,
+    "gamma": 1.0,
+    "reg_alpha": 0.1,
+    "reg_lambda": 1.0,
+    "scale_pos_weight": 3,
+    "eval_metric": "logloss",
+    "random_state": 42
+  }
+}
