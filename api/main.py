@@ -1,11 +1,11 @@
 """
-FastAPI xG Engine — WC 2026
+FastAPI xG Engine — WC 2026 (simplified)
 Endpoints:
   GET  /                      health check
-  POST /predict/shot          xG for a single shot
-  POST /predict/match         simulated match xG for two teams
-  GET  /model/info            model metadata + SHAP importances
   GET  /teams                 list of WC 2026 teams with style profiles
+  POST /predict/shot          xG for a single shot
+  POST /predict/match         team xG totals + simulated shot locations
+  GET  /model/info            model metadata + SHAP importances
 """
 
 from __future__ import annotations
@@ -48,11 +48,17 @@ _meta:  dict | None = None
 FEATURES = [
     "distance", "angle", "is_header", "is_volley",
     "is_big_chance", "is_free_kick", "defenders_in_cone",
-    "gk_set", "centrality","dist_angle"
+    "gk_set", "centrality", "dist_angle"
 ]
 
 
 def get_model() -> xgb.XGBClassifier:
+    """
+    Loads the trained xG model from disk the first time it's needed,
+    then keeps it in memory so we don't reload it on every single request.
+    Think of it like opening a heavy book once and keeping it on your desk,
+    instead of walking to the shelf every time you need to read a line.
+    """
     global _model
     if _model is None:
         if not os.path.exists(MODEL_PATH):
@@ -65,6 +71,11 @@ def get_model() -> xgb.XGBClassifier:
 
 
 def get_meta() -> dict:
+    """
+    Loads the model's 'report card' — accuracy scores and which features
+    mattered most — from a JSON file, and caches it the same way get_model()
+    does. This is what powers the /model/info endpoint.
+    """
     global _meta
     if _meta is None and os.path.exists(META_PATH):
         with open(META_PATH) as f:
@@ -75,6 +86,9 @@ def get_meta() -> dict:
 # ---------------------------------------------------------------------------
 # Team profiles
 # ---------------------------------------------------------------------------
+# A hand-written lookup table, not something the model learned. For each
+# team it just stores a rough playing style label and a plausible xG range
+# per match, used later to decide how many shots to simulate for that team.
 
 TEAMS: dict[str, dict] = {
     "Argentina":   {"style": "attack",     "xg_range": [1.6, 2.2]},
@@ -99,27 +113,17 @@ TEAMS: dict[str, dict] = {
     "Colombia":    {"style": "balanced",   "xg_range": [1.0, 1.6]},
 }
 
-WC2026_VENUES = [
-    "MetLife Stadium, NJ",
-    "Rose Bowl, LA",
-    "AT&T Stadium, TX",
-    "Levi's Stadium, CA",
-    "Arrowhead Stadium, KC",
-    "Hard Rock Stadium, MIA",
-    "Lincoln Financial Field, PHI",
-    "SoFi Stadium, LA",
-    "Estadio Azteca, Mexico City",
-    "Estadio BBVA, Monterrey",
-    "BMO Field, Toronto",
-    "BC Place, Vancouver",
-]
-
 
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
 
 class ShotRequest(BaseModel):
+    """
+    What the caller must send in to ask 'what's the xG of this shot?' —
+    where the shot was taken from, and a few yes/no facts about it
+    (was it a header, a free kick, how many defenders were in the way).
+    """
     x:                 float = Field(..., ge=0, le=120, description="Shot x-coordinate (StatsBomb: 0-120)")
     y:                 float = Field(..., ge=0, le=80,  description="Shot y-coordinate (StatsBomb: 0-80)")
     is_header:         int   = Field(0, ge=0, le=1)
@@ -130,6 +134,11 @@ class ShotRequest(BaseModel):
 
 
 class ShotResponse(BaseModel):
+    """
+    What we hand back for a single shot: the xG number itself, plus the
+    distance and angle we calculated along the way, so the caller can see
+    the reasoning, not just the final probability.
+    """
     xg:              float
     distance:        float
     angle_deg:       float
@@ -138,32 +147,30 @@ class ShotResponse(BaseModel):
 
 
 class MatchRequest(BaseModel):
+    """
+    What the caller sends in to compare two teams — just their names.
+    """
     home_team: str = Field(..., description="Home team name (see /teams)")
     away_team: str = Field(..., description="Away team name (see /teams)")
-    venue:     str = Field("MetLife Stadium, NJ")
-    stage:     str = Field("Group Stage")
 
 
-class ShotSim(BaseModel):
-    x:      float
-    y:      float
-    xg:     float
-    goal:   bool
-    side:   str
+class ShotLocation(BaseModel):
+    """One simulated shot, in StatsBomb 120 x 80 pitch coordinates."""
+    x: float
+    y: float
+    xg: float
 
 
 class MatchResponse(BaseModel):
-    home_team:      str
-    away_team:      str
-    venue:          str
-    home_xg:        float
-    away_xg:        float
-    home_win_prob:  float
-    draw_prob:      float
-    away_win_prob:  float
-    home_shots:     list[ShotSim]
-    away_shots:     list[ShotSim]
-    model_used:     str
+    """Match-level xG totals plus the individual shots used to make them."""
+    home_team: str
+    away_team: str
+    home_xg: float
+    away_xg: float
+    home_shots: int
+    away_shots: int
+    home_shot_locations: list[ShotLocation]
+    away_shot_locations: list[ShotLocation]
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +178,13 @@ class MatchResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 def compute_derived(x: float, y: float) -> dict:
+    """
+    Takes a raw shot location on the pitch and works out the things that
+    actually matter for scoring: how far from goal it is, and how wide
+    the goal 'looks' from that spot (a shot from dead center sees almost
+    the whole goal; a shot from a tight angle barely sees any of it).
+    Also flags whether it counts as a clear-cut chance.
+    """
     goal_x, goal_y = 120.0, 40.0
     dx = goal_x - x
     dy = goal_y - y
@@ -195,6 +209,13 @@ def compute_derived(x: float, y: float) -> dict:
 
 
 def build_feature_vector(req: ShotRequest) -> np.ndarray:
+    """
+    Packages everything about one shot — distance, angle, header?,
+    free kick?, defenders in the way, etc. — into the exact list of
+    numbers, in the exact order, that the trained model expects to see.
+    This has to match the training data's format exactly or the model's
+    predictions won't make sense.
+    """
     derived = compute_derived(req.x, req.y)
     vec = [
         derived["distance"],
@@ -211,64 +232,46 @@ def build_feature_vector(req: ShotRequest) -> np.ndarray:
     return np.array(vec, dtype=np.float32).reshape(1, -1)
 
 
-def simulate_team_shots(team: str, side: str, n_shots: int) -> tuple[list[ShotSim], float]:
+def simulate_team_xg(team: str, side: str, n_shots: int) -> tuple[float, list[ShotLocation]]:
     """
-    Generate realistic shot positions for a team based on xG range profile,
-    then run each through the model.
-    """
-    model   = get_model()
-    profile = TEAMS[team]
-    lo, hi  = profile["xg_range"]
-    shots   = []
-    total_xg = 0.0
+    This project does not have event data for a future fixture, so it
+    generates plausible shot locations. Every generated shot is scored
+    by the trained XGBoost model. The exact same per-shot xG values are
+    returned to the dashboard and added to the team's total.
 
+    Important: the locations are simulated, not actual match events.
+    """
+    model = get_model()
     rng = random.Random()
+    total_xg = 0.0
+    shot_locations: list[ShotLocation] = []
 
     for _ in range(n_shots):
-        # Shots cluster around the box (x: 90-118, y: 28-52) with tails
         if side == "home":
-            x = rng.gauss(104, 8)
-            x = max(80, min(118, x))
+            x = max(80.0, min(118.0, rng.gauss(104.0, 8.0)))
         else:
-            x = rng.gauss(16, 8)
-            x = max(2, min(40, x))
-
-        y = rng.gauss(40, 9)
-        y = max(10, min(70, y))
-
-        defenders = rng.randint(0, 3)
-        is_header = 1 if rng.random() < 0.18 else 0
-        is_fk     = 1 if rng.random() < 0.08 else 0
+            x = max(2.0, min(40.0, rng.gauss(16.0, 8.0)))
+        y = max(10.0, min(70.0, rng.gauss(40.0, 9.0)))
 
         req = ShotRequest(
-            x=x, y=y,
-            is_header=is_header,
+            x=x,
+            y=y,
+            is_header=1 if rng.random() < 0.18 else 0,
             is_volley=0,
-            is_free_kick=is_fk,
-            defenders_in_cone=defenders,
+            is_free_kick=1 if rng.random() < 0.08 else 0,
+            defenders_in_cone=rng.randint(0, 3),
             gk_set=1,
         )
         fvec = build_feature_vector(req)
-        xg_val = float(model.predict_proba(fvec)[0, 1])
-        xg_val = round(min(xg_val, 0.95), 3)
-        total_xg += xg_val
+        model_xg = float(model.predict_proba(fvec)[0, 1])
+        shot_xg = round(min(max(model_xg, 0.0), 0.95), 3)
+        total_xg += shot_xg
 
-        is_goal = rng.random() < xg_val
-        shots.append(ShotSim(
-            x=round(x, 1), y=round(y, 1),
-            xg=xg_val, goal=is_goal, side=side,
-        ))
+        shot_locations.append(
+            ShotLocation(x=round(x, 2), y=round(y, 2), xg=shot_xg)
+        )
 
-    return shots, round(total_xg, 3)
-
-
-def compute_win_probs(xg_h: float, xg_a: float) -> tuple[float, float, float]:
-    diff  = xg_h - xg_a
-    p_h   = max(0.10, min(0.70, 0.38 + diff * 0.10))
-    p_a   = max(0.10, min(0.70, 0.38 - diff * 0.10))
-    p_d   = max(0.05, 1.0 - p_h - p_a)
-    total = p_h + p_d + p_a
-    return round(p_h / total, 3), round(p_d / total, 3), round(p_a / total, 3)
+    return round(total_xg, 3), shot_locations
 
 
 # ---------------------------------------------------------------------------
@@ -277,22 +280,33 @@ def compute_win_probs(xg_h: float, xg_a: float) -> tuple[float, float, float]:
 
 @app.get("/")
 def health():
+    """
+    A simple 'are you awake?' check. If this responds, the API is running.
+    """
     return {"status": "ok", "service": "WC 2026 xG Engine", "version": "1.0.0"}
 
 
 @app.get("/teams")
 def list_teams():
+    """
+    Just hands back the static list of teams and their style profiles —
+    no model, no calculation, purely a lookup.
+    """
     return {
         "teams": [
             {"name": k, "style": v["style"], "xg_range": v["xg_range"]}
             for k, v in TEAMS.items()
         ],
-        "venues": WC2026_VENUES,
     }
 
 
 @app.get("/model/info")
 def model_info():
+    """
+    Returns the model's stats report — how accurate it is, and which
+    features (distance, angle, etc.) it relied on most. Lets someone
+    inspect the model without needing to retrain it.
+    """
     meta = get_meta()
     if not meta:
         return {"warning": "Model not trained yet. Run models/train.py."}
@@ -301,6 +315,11 @@ def model_info():
 
 @app.post("/predict/shot", response_model=ShotResponse)
 def predict_shot(req: ShotRequest):
+    """
+    The main event: given one shot's details, work out distance and angle,
+    feed everything into the trained model, and return the probability
+    it results in a goal — the xG value.
+    """
     try:
         model = get_model()
     except RuntimeError as e:
@@ -321,6 +340,13 @@ def predict_shot(req: ShotRequest):
 
 @app.post("/predict/match", response_model=MatchResponse)
 def predict_match(req: MatchRequest):
+    """
+    Given two team names, checks they're valid and different, decides
+    how many shots each team would plausibly take based on their style,
+    simulates that many shots for each through the real model, and
+    returns each team's total xG. This is the endpoint behind the
+    Match Prediction tab.
+    """
     if req.home_team not in TEAMS:
         raise HTTPException(status_code=400, detail=f"Unknown team: {req.home_team}. See /teams.")
     if req.away_team not in TEAMS:
@@ -333,30 +359,22 @@ def predict_match(req: MatchRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    h_profile = TEAMS[req.home_team]
-    a_profile = TEAMS[req.away_team]
-
-    # Shot count scales with team style
     style_shots = {"attack": 10, "balanced": 8, "possession": 9, "defensive": 6, "pressing": 7}
-    h_n = style_shots.get(h_profile["style"], 11)
-    a_n = style_shots.get(a_profile["style"], 11)
+    h_n = style_shots.get(TEAMS[req.home_team]["style"], 8)
+    a_n = style_shots.get(TEAMS[req.away_team]["style"], 8)
 
-    home_shots, home_xg = simulate_team_shots(req.home_team, "home", h_n)
-    away_shots, away_xg = simulate_team_shots(req.away_team, "away", a_n)
-    ph, pd, pa           = compute_win_probs(home_xg, away_xg)
+    home_xg, home_shot_locations = simulate_team_xg(req.home_team, "home", h_n)
+    away_xg, away_shot_locations = simulate_team_xg(req.away_team, "away", a_n)
 
     return MatchResponse(
         home_team=req.home_team,
         away_team=req.away_team,
-        venue=req.venue,
         home_xg=home_xg,
         away_xg=away_xg,
-        home_win_prob=ph,
-        draw_prob=pd,
-        away_win_prob=pa,
-        home_shots=home_shots,
-        away_shots=away_shots,
-        model_used="xgboost_statsbomb_v1",
+        home_shots=h_n,
+        away_shots=a_n,
+        home_shot_locations=home_shot_locations,
+        away_shot_locations=away_shot_locations,
     )
 
 

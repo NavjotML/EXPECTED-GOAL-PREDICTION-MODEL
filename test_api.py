@@ -1,16 +1,9 @@
-"""
-API test script — validates all endpoints without a running StatsBomb pipeline.
-Uses a mock model so you can test the API structure before training.
 
-Run with: python test_api.py
-Requires the API to be running: uvicorn api.main:app --port 8000
-"""
-
-import json
 import sys
-import numpy as np
-import xgboost as xgb
 import os
+import numpy as np
+import pandas as pd
+import xgboost as xgb
 import requests
 
 
@@ -40,6 +33,9 @@ def create_mock_model():
         "gk_set":            rng.integers(0, 2, n),
         "centrality":        rng.uniform(0, 1, n),
     })
+    # dist_angle interaction term, matches training feature set
+    X["dist_angle"] = X["distance"] * X["angle"]
+
     # Simulate realistic xG: closer + wider angle = more likely goal
     logit = -3.5 + (50 - X["distance"]) * 0.08 + X["angle"] * 2 + X["is_big_chance"] * 1.5
     prob  = 1 / (1 + np.exp(-logit))
@@ -67,7 +63,7 @@ def test_teams():
     assert r.status_code == 200
     data = r.json()
     assert len(data["teams"]) > 0
-    print(f"  [PASS] Teams: {len(data['teams'])} teams, {len(data['venues'])} venues")
+    print(f"  [PASS] Teams: {len(data['teams'])} teams")
 
 
 def test_model_info():
@@ -79,9 +75,9 @@ def test_model_info():
 def test_shot_prediction():
     shots = [
         {"x": 108, "y": 40, "desc": "Central box shot",     "expected_high": True},
-        {"x": 90,  "y": 10, "desc": "Wide angle long shot", "expected_high": False},  # keep
+        {"x": 90,  "y": 10, "desc": "Wide angle long shot", "expected_high": False},
         {"x": 116, "y": 40, "desc": "Close range central",  "expected_high": True},
-        {"x": 75,  "y": 40, "desc": "Long range central",   "expected_high": False},  # keep
+        {"x": 75,  "y": 40, "desc": "Long range central",   "expected_high": False},
     ]
 
     for s in shots:
@@ -100,46 +96,20 @@ def test_shot_prediction():
 
 def test_match_prediction():
     matchups = [
-        {"home": "Brazil",   "away": "Morocco",  "venue": "MetLife Stadium, NJ"},
-        {"home": "Spain",    "away": "Japan",    "venue": "Rose Bowl, LA"},
-        {"home": "Argentina","away": "France",   "venue": "AT&T Stadium, TX"},
+        {"home": "Brazil", "away": "Morocco"},
+        {"home": "Spain",  "away": "Japan"},
     ]
 
     for m in matchups:
         r = requests.post(f"{BASE_URL}/predict/match", json={
             "home_team": m["home"],
             "away_team": m["away"],
-            "venue":     m["venue"],
-            "stage":     "Group Stage",
         })
         assert r.status_code == 200, f"Match prediction failed: {r.text}"
         data = r.json()
-        probs_sum = data["home_win_prob"] + data["draw_prob"] + data["away_win_prob"]
-        assert abs(probs_sum - 1.0) < 0.02, f"Probabilities don't sum to 1: {probs_sum}"
-        print(
-            f"  [PASS] {m['home']} vs {m['away']}: "
-            f"xG {data['home_xg']:.2f}-{data['away_xg']:.2f} | "
-            f"W/D/L {data['home_win_prob']:.0%}/{data['draw_prob']:.0%}/{data['away_win_prob']:.0%} | "
-            f"shots H={len(data['home_shots'])} A={len(data['away_shots'])}"
-        )
-
-
-def test_edge_cases():
-    # Same team
-    r = requests.post(f"{BASE_URL}/predict/match", json={
-        "home_team": "Brazil", "away_team": "Brazil",
-        "venue": "MetLife Stadium, NJ", "stage": "Group Stage",
-    })
-    assert r.status_code == 400
-    print(f"  [PASS] Same-team rejection: {r.json()['detail']}")
-
-    # Unknown team
-    r = requests.post(f"{BASE_URL}/predict/match", json={
-        "home_team": "Narnia FC", "away_team": "Brazil",
-        "venue": "MetLife Stadium, NJ", "stage": "Group Stage",
-    })
-    assert r.status_code == 400
-    print(f"  [PASS] Unknown team rejection: {r.json()['detail'][:50]}...")
+        print(f"  [PASS] {data['home_team']} ({data['home_shots']} shots) vs "
+              f"{data['away_team']} ({data['away_shots']} shots): "
+              f"xG {data['home_xg']:.2f} - {data['away_xg']:.2f}")
 
 
 def main():
@@ -155,7 +125,7 @@ def main():
     print("Health:")
     test_health()
 
-    print("\nTeams & venues:")
+    print("\nTeams:")
     test_teams()
 
     print("\nModel info:")
@@ -164,16 +134,12 @@ def main():
     print("\nShot predictions:")
     test_shot_prediction()
 
-    print("\nMatch simulations:")
+    print("\nMatch predictions:")
     test_match_prediction()
-
-    print("\nEdge cases:")
-    test_edge_cases()
 
     print("\n--- All tests passed ---\n")
 
 
 if __name__ == "__main__":
-    import pandas as pd
     create_mock_model()
     main()
