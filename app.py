@@ -6,15 +6,14 @@ Connects to the deployed WC 2026 xG Engine FastAPI backend
 
 import streamlit as st
 import requests
-import io
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import warnings
-warnings.filterwarnings("ignore")
+import io  # Added for safe image rendering
 
-plt.rcParams["figure.max_open_warning"] = 0
+warnings.filterwarnings("ignore")
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -195,6 +194,16 @@ def check_api() -> bool:
     return result is not None and result.get("status") == "ok"
 
 
+def show_fig_safely(fig):
+    """Safely renders a matplotlib figure on headless servers like Render."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+    buf.seek(0)
+    st.image(buf, width="stretch")
+    plt.close(fig)
+    buf.close()
+
+
 # ---------------------------------------------------------------------------
 # Pitch drawing helpers
 # ---------------------------------------------------------------------------
@@ -332,21 +341,6 @@ def draw_shap_bar(shap_importance: dict):
     ax.spines[:].set_visible(False)
     plt.tight_layout(pad=0.5)
     return fig
-
-
-def fig_to_image(fig):
-    """Convert matplotlib figure to PNG bytes for reliable Streamlit display on Render."""
-    buf = io.BytesIO()
-    fig.savefig(
-        buf,
-        format="png",
-        dpi=150,
-        bbox_inches="tight",
-        facecolor=fig.get_facecolor(),
-        edgecolor="none",
-    )
-    buf.seek(0)
-    return buf
 
 
 # ---------------------------------------------------------------------------
@@ -508,13 +502,12 @@ with tab1:
                 st.caption(f"{r['home_team']} · {len(home_shots)} simulated shots")
             with map_col2:
                 st.caption(f"{r['away_team']} · {len(away_shots)} simulated shots")
-
+            
             fig = draw_full_pitch_with_shots(
                 home_shots, away_shots, r["home_team"], r["away_team"]
             )
-            st.image(fig_to_image(fig), use_container_width=True)
-            plt.close(fig)
-
+            show_fig_safely(fig)  # <-- UPDATED
+            
             st.caption(
                 "Each marker represents a simulated shot. Larger markers indicate higher xG; "
                 "gold = xG ≥ 0.15, green = xG < 0.15."
@@ -560,8 +553,7 @@ with tab2:
         c1, c2 = st.columns([3, 2])
         with c1:
             fig = draw_shot_map_single(s_xy[0], s_xy[1], sr["xg"])
-            st.image(fig_to_image(fig), use_container_width=True)
-            plt.close(fig)
+            show_fig_safely(fig)  # <-- UPDATED
         with c2:
             st.markdown(f"""
             <div class="metric-card">
@@ -641,8 +633,7 @@ with tab3:
             c1, c2 = st.columns([2, 3])
             with c1:
                 fig = draw_shap_bar(shap_imp)
-                st.image(fig_to_image(fig), use_container_width=True)
-                plt.close(fig)
+                show_fig_safely(fig)  # <-- UPDATED
             with c2:
                 import pandas as pd
                 df_shap = pd.DataFrame([
