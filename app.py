@@ -1,10 +1,9 @@
 """
 WC 2026 xG Engine — Streamlit Dashboard
 Run: streamlit run app.py
-Requires API running at localhost:8000
+Connects to the deployed WC 2026 xG Engine FastAPI backend
 """
 
-import io
 import streamlit as st
 import requests
 import matplotlib
@@ -172,15 +171,6 @@ VENUES = [
 STAGES = ["Group Stage", "Round of 32", "Round of 16", "Quarter-Final", "Semi-Final", "Final"]
 
 
-def fig_to_image(fig):
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight",
-                facecolor=fig.get_facecolor())
-    buf.seek(0)
-    plt.close(fig)
-    return buf
-
-
 def api_get(endpoint: str):
     try:
         r = requests.get(f"{API_BASE}{endpoint}", timeout=5)
@@ -220,16 +210,19 @@ def draw_full_pitch_with_shots(home_shots, away_shots, home_team, away_team):
         ax.set_aspect("equal")
         ax.axis("off")
 
+        # Pitch outline
         pitch = patches.Rectangle((0, 0), 120, 80,
                                    linewidth=1, edgecolor="#1A3A20", facecolor="none")
         ax.add_patch(pitch)
 
+        # Centre circle + spot
         centre = plt.Circle((60, 40), 10, linewidth=0.8,
                              edgecolor="#1A3A20", facecolor="none")
         ax.add_patch(centre)
         ax.plot(60, 40, "o", color="#1A3A20", markersize=3)
         ax.axvline(60, color="#1A3A20", linewidth=0.8)
 
+        # Both penalty boxes
         for bx, is_right in [(0, False), (102, True)]:
             box = patches.Rectangle((bx, 18), 18, 44,
                                      linewidth=0.8, edgecolor="#1A3A20", facecolor="none")
@@ -238,14 +231,17 @@ def draw_full_pitch_with_shots(home_shots, away_shots, home_team, away_team):
                                      linewidth=0.8, edgecolor="#162A18", facecolor="none")
             ax.add_patch(six)
 
+        # Goals
         for gx in [(-2, True), (120, False)]:
             goal = patches.Rectangle((gx[0], 36), 2, 8,
                                       linewidth=1, edgecolor="#C9A84C66", facecolor="#C9A84C11")
             ax.add_patch(goal)
 
+        # Penalty spots
         ax.plot(12, 40, "o", color="#1A3A20", markersize=2)
         ax.plot(108, 40, "o", color="#1A3A20", markersize=2)
 
+        # Shot scatter
         if shots:
             for shot in shots:
                 try:
@@ -255,6 +251,8 @@ def draw_full_pitch_with_shots(home_shots, away_shots, home_team, away_team):
                 except (KeyError, TypeError, ValueError):
                     continue
 
+                # Mirror away-team x coordinates so both panels show attacks
+                # towards the right-hand goal.
                 plot_x = raw_x if side == "home" else 120.0 - raw_x
                 size = 60 + xg * 400
                 color = "#C9A84C" if xg >= 0.15 else "#2A6A3A"
@@ -266,7 +264,11 @@ def draw_full_pitch_with_shots(home_shots, away_shots, home_team, away_team):
                 )
 
         ax.set_title(team.upper(), color="#C9A84C",
-                     fontsize=9, pad=6, fontweight="bold")
+                     fontsize=9,
+                     pad=6, fontweight="bold")
+        ax.text(60, -1.5, team.upper(), color="#C9A84C",
+                fontsize=9, ha="center", va="top", fontweight="bold",
+                transform=ax.transData)
 
     plt.tight_layout(pad=0.5)
     return fig
@@ -342,7 +344,8 @@ with st.sidebar:
     if api_ok:
         st.success("API connected", icon=None)
     else:
-        st.warning("API warming up — try Run Prediction, it may take ~30s on first load.")
+        st.error("API offline — start uvicorn")
+        st.code("cd api\nuvicorn main:app --port 8000")
 
     st.markdown("---")
     st.markdown('<p class="section-label">Match Setup</p>', unsafe_allow_html=True)
@@ -391,12 +394,13 @@ with tab1:
                 })
             if result:
                 st.session_state["match_result"] = result
-            else:
-                st.error("API did not respond. Wait 30s and try again (free tier cold start).")
+            elif not api_ok:
+                st.error("API is not running. Start uvicorn first.")
 
     if "match_result" in st.session_state:
         r = st.session_state["match_result"]
 
+        # Teams header
         c1, c2, c3 = st.columns([5, 2, 5])
         with c1:
             st.markdown(f"""
@@ -418,6 +422,7 @@ with tab1:
 
         st.markdown("")
 
+        # xG + shots + simulated score
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.markdown(f"""
@@ -449,6 +454,7 @@ with tab1:
                     <div class="metric-sub">Most likely simulation</div>
                 </div>""", unsafe_allow_html=True)
 
+        # Win probability bar
         if "home_win_prob" in r:
             st.markdown('<p class="section-label">WIN PROBABILITY</p>', unsafe_allow_html=True)
             hw = r["home_win_prob"]
@@ -474,6 +480,10 @@ with tab1:
             """
             st.markdown(bar_html, unsafe_allow_html=True)
 
+        # Shot map — generated by the match API from the same shot-level xG
+        # predictions that are summed into the team totals above.
+        # These are simulated locations for a projected fixture, not actual
+        # event-data shots from a match that has already been played.
         home_shots = r.get("home_shot_locations") or []
         away_shots = r.get("away_shot_locations") or []
         st.markdown('<p class="section-label">SHOT MAP</p>', unsafe_allow_html=True)
@@ -486,13 +496,17 @@ with tab1:
             fig = draw_full_pitch_with_shots(
                 home_shots, away_shots, r["home_team"], r["away_team"]
             )
-            st.image(fig_to_image(fig), use_container_width=True)
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
             st.caption(
                 "Each marker represents a simulated shot. Larger markers indicate higher xG; "
                 "gold = xG ≥ 0.15, green = xG < 0.15."
             )
         else:
-            st.warning("No shot coordinates returned. Try Run Prediction again.")
+            st.warning(
+                "No shot coordinates were returned. Restart the updated FastAPI backend "
+                "and click Run Prediction again."
+            )
 
     else:
         st.markdown("""
@@ -529,7 +543,8 @@ with tab2:
         c1, c2 = st.columns([3, 2])
         with c1:
             fig = draw_shot_map_single(s_xy[0], s_xy[1], sr["xg"])
-            st.image(fig_to_image(fig), use_container_width=True)
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
         with c2:
             st.markdown(f"""
             <div class="metric-card">
@@ -609,7 +624,8 @@ with tab3:
             c1, c2 = st.columns([2, 3])
             with c1:
                 fig = draw_shap_bar(shap_imp)
-                st.image(fig_to_image(fig), use_container_width=True)
+                st.pyplot(fig, use_container_width=True)
+                plt.close(fig)
             with c2:
                 import pandas as pd
                 df_shap = pd.DataFrame([
